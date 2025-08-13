@@ -11,7 +11,7 @@ from langchain_openai import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.memory import ConversationSummaryMemory
 from langchain.chains import ConversationalRetrievalChain
-from langchain.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
 
 # =============================
 # Configurazione base
@@ -298,4 +298,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
