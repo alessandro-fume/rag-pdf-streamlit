@@ -111,8 +111,7 @@ def extract_text_from_pdfs(pdfs) -> str:
 
 def chunk_text(text: str):
     splitter = CharacterTextSplitter(
-        separator="
-",
+        separator="\n",
         chunk_size=1000,    # chunk più grandi per documenti estesi
         chunk_overlap=100,  # piccolo overlap
         length_function=len,
@@ -364,3 +363,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
