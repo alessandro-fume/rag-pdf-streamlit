@@ -111,7 +111,8 @@ def extract_text_from_pdfs(pdfs) -> str:
 
 def chunk_text(text: str):
     splitter = CharacterTextSplitter(
-        separator="\n",
+        separator="
+",
         chunk_size=1000,    # chunk più grandi per documenti estesi
         chunk_overlap=100,  # piccolo overlap
         length_function=len,
@@ -330,7 +331,7 @@ def main():
                 except Exception as e:
                     st.error(f"❌ Errore durante la risposta: {e}")
 
-       # --- RENDER COMPLETO DELLA CHAT (persistente) ---
+    # --- RENDER COMPLETO DELLA CHAT (persistente) ---
     if st.session_state.get("messages"):
         for msg in st.session_state.messages:
             if msg["role"] == "user":
@@ -342,7 +343,11 @@ def main():
         if st.session_state.get("last_sources"):
             with st.expander("🔍 Contenuti utilizzati per l'ultima risposta"):
                 for i, doc in enumerate(st.session_state.last_sources):
-                    st.markdown(f"**Chunk {i+1}:**\n\n{doc.page_content}\n\n---")
+                    st.markdown(f"**Chunk {i+1}:**
+
+{doc.page_content}
+
+---")
 
     # Informativa rapida
     with st.expander("ℹ️ Note importanti"):
@@ -357,7 +362,5 @@ def main():
         )
 
 
-
-
-
-
+if __name__ == "__main__":
+    main()
