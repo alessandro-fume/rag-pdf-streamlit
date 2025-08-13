@@ -12,19 +12,13 @@ from langchain_community.vectorstores import FAISS
 from langchain.memory import ConversationSummaryMemory
 from langchain.chains import ConversationalRetrievalChain
 
-# =============================
-# Configurazione base
-# =============================
 APP_TITLE = "Chatbot EOS Reply – Gestione Documenti (Web Ready)"
 APP_ICON = "📚"
-BASE_DIR = "vectorstore"  # cartella PERSISTENTE tra esecuzioni per gli indici
-
-# Marker di fiducia per caricare indici in sicurezza
+BASE_DIR = "vectorstore"
 TRUST_MARK_FILE = ".trusted_by_app"
 TRUST_MARK_VALUE = "EOS-REPLY-RAG-V1"
-LEGACY_PREFIXES = ("ws_",)  # vecchie cartelle create prima di questa versione
+LEGACY_PREFIXES = ("ws_",)
 
-# Template CSS e HTML per chat
 CSS = """
 <style>
     .chat-msg { padding: 0.75rem 1rem; border-radius: 12px; margin: 0.25rem 0; }
@@ -36,10 +30,6 @@ CSS = """
 """
 USER_TEMPLATE = """<div class="chat-msg user"><div class="msg">{msg}</div></div>"""
 BOT_TEMPLATE = """<div class="chat-msg bot"><div class="msg">{msg}</div></div>"""
-
-# =============================
-# Utility
-# =============================
 
 def get_openai_key_from_secrets() -> str:
     key = st.secrets.get("OPENAI_API_KEY")
@@ -77,10 +67,6 @@ def list_indices() -> list:
                 items.append(d.name)
     return sorted(items)
 
-# =============================
-# PDF → Testo
-# =============================
-
 def extract_text_from_pdfs(pdfs) -> str:
     text = ""
     for pdf in pdfs:
@@ -100,10 +86,6 @@ def chunk_text(text: str):
         length_function=len,
     )
     return splitter.split_text(text)
-
-# =============================
-# Vettori & Chain
-# =============================
 
 def build_vectorstore(chunks, path: str):
     embeddings = OpenAIEmbeddings()
@@ -136,26 +118,19 @@ def build_chain(vectorstore, temperature: float):
         output_key="answer",
     )
 
-# =============================
-# App
-# =============================
-
 def main():
     st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON)
     get_openai_key_from_secrets()
     st.markdown(CSS, unsafe_allow_html=True)
     st.title(APP_TITLE)
-    st.caption("RAG su PDF – versione pronta per deploy web. Nessun limite di pagine/size (attenzione a tempi/costi).")
 
-    defaults = {"conversation": None, "chat_history": None, "last_text_preview": "", "current_index": None, "confirm_delete": False, "llm_temperature": 0.3, "messages": [], "last_sources": []}
+    defaults = {"conversation": None, "chat_history": None, "last_text_preview": "", "current_index": None, "confirm_delete": False, "llm_temperature": 0.3, "messages": [], "last_sources": [], "question_input": ""}
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
     with st.sidebar:
-        st.subheader("⚙️ Impostazioni")
         st.session_state.llm_temperature = st.slider("Temperatura del modello", 0.0, 1.0, 0.3, step=0.1)
-        st.subheader("📁 Indici disponibili (persistenti)")
         indices = list_indices()
         selected = st.selectbox("Scegli un documento indicizzato", options=["-- Nessuno --"] + indices)
         if selected != "-- Nessuno --":
@@ -175,7 +150,6 @@ def main():
                         st.error(f"Errore durante l'eliminazione: {e}")
                         st.session_state.confirm_delete = False
         st.markdown("---")
-        st.subheader("📤 Carica nuovo PDF da indicizzare")
         pdf_doc = st.file_uploader("Carica un PDF", type=["pdf"], accept_multiple_files=False)
         overwrite = st.checkbox("Sovrascrivi se già esistente", value=False)
         if pdf_doc and st.button("Processa e indicizza"):
@@ -209,7 +183,6 @@ def main():
                 vs = load_vectorstore(os.path.join(ensure_store_dir(), selected))
                 st.session_state.conversation = build_chain(vs, st.session_state.llm_temperature)
                 st.session_state.current_index = selected
-                st.success(f"✅ Indice '{selected}' caricato!")
                 pdf_path = os.path.join(ensure_store_dir(), selected, "documento.pdf")
                 if os.path.exists(pdf_path):
                     with pdfplumber.open(pdf_path) as pdf_file:
@@ -230,7 +203,7 @@ def main():
             st.markdown("- **Fammi un riassunto per avere il contesto.**")
             st.markdown("- **Quali sono i punti chiave trattati?**")
 
-    user_question = st.text_input("Fai una domanda sul documento selezionato:")
+    user_question = st.text_input("Fai una domanda sul documento selezionato:", value=st.session_state.question_input)
     if user_question:
         if not st.session_state.conversation:
             st.warning("⚠️ Seleziona o carica prima un documento.")
@@ -241,6 +214,7 @@ def main():
                     response = st.session_state.conversation({"question": user_question})
                     st.session_state.messages.append({"role": "assistant", "content": response["answer"]})
                     st.session_state.last_sources = response.get("source_documents", [])
+                    st.session_state.question_input = ""  # Pulisce il box dopo l'invio
                 except Exception as e:
                     st.error(f"❌ Errore durante la risposta: {e}")
 
