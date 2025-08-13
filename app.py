@@ -342,7 +342,8 @@ def main():
         if st.session_state.get("last_sources"):
             with st.expander("🔍 Contenuti utilizzati per l'ultima risposta"):
                 for i, doc in enumerate(st.session_state.last_sources):
-                    st.markdown(f"**Chunk {i+1}:**
+                    st.markdown(f"**Chunk {i+1}:**\n\n{doc.page_content}\n\n---")
+
 
 {doc.page_content}
 
@@ -363,4 +364,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
