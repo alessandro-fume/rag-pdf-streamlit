@@ -7,18 +7,17 @@ import shutil
 import streamlit as st
 import pdfplumber
 from langchain.text_splitter import CharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
 from langchain.memory import ConversationSummaryMemory
 from langchain.chains import ConversationalRetrievalChain
-from langchain_openai import ChatOpenAI
 
 # =============================
 # Configurazione base
 # =============================
 APP_TITLE = "Chatbot EOS Reply – Gestione Documenti (Web Ready)"
 APP_ICON = "📚"
-BASE_DIR = "vectorstore"  # verrà namespacizzata per sessione
+BASE_DIR = "vectorstore"  # cartella PERSISTENTE tra esecuzioni per gli indici
 
 # Template semplici inline per evitare dipendenze esterne
 CSS = """
@@ -51,14 +50,10 @@ def get_openai_key_from_secrets() -> str:
     return key
 
 
-def session_workspace() -> str:
-    """Crea una cartella di lavoro isolata per la sessione utente (evita collisioni fra utenti)."""
-    if "workspace_dir" not in st.session_state:
-        suffix = hashlib.sha1(f"{time.time()}-{st.session_state.get('_session_id','')}".encode()).hexdigest()[:8]
-        ws = os.path.join(BASE_DIR, f"ws_{suffix}")
-        os.makedirs(ws, exist_ok=True)
-        st.session_state.workspace_dir = ws
-    return st.session_state.workspace_dir
+def ensure_store_dir() -> str:
+    """Ritorna la cartella *globale e persistente* che contiene tutti gli indici."""
+    os.makedirs(BASE_DIR, exist_ok=True)
+    return BASE_DIR
 
 
 def safe_name(name: str) -> str:
@@ -68,7 +63,7 @@ def safe_name(name: str) -> str:
 
 
 def list_indices() -> list:
-    base = session_workspace()
+    base = ensure_store_dir()
     return [d.name for d in os.scandir(base) if d.is_dir()] if os.path.exists(base) else []
 
 
@@ -156,6 +151,8 @@ def main():
         "current_index": None,
         "confirm_delete": False,
         "llm_temperature": 0.3,
+        "messages": [],         # cronologia persistente lato UI
+        "last_sources": [],     # fonti dell'ultima risposta
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -165,7 +162,7 @@ def main():
         st.subheader("⚙️ Impostazioni")
         st.session_state.llm_temperature = st.slider("Temperatura del modello", 0.0, 1.0, 0.3, step=0.1)
 
-        st.subheader("📁 Indici nella tua workspace")
+        st.subheader("📁 Indici disponibili (persistenti)")
         indices = list_indices()
         selected = st.selectbox("Scegli un documento indicizzato", options=["-- Nessuno --"] + indices)
 
@@ -178,13 +175,15 @@ def main():
             with col2:
                 if st.session_state.confirm_delete and st.button("✅ Conferma"):
                     try:
-                        shutil.rmtree(os.path.join(session_workspace(), selected))
+                        shutil.rmtree(os.path.join(ensure_store_dir(), selected))
                         st.success(f"Indice '{selected}' eliminato.")
                         st.session_state.update({
                             "conversation": None,
                             "last_text_preview": "",
                             "current_index": None,
                             "confirm_delete": False,
+                            "messages": [],
+                            "last_sources": [],
                         })
                         st.rerun()
                     except Exception as e:
@@ -200,10 +199,11 @@ def main():
             with st.spinner("📚 Indicizzazione in corso (potrebbe richiedere tempo per PDF molto grandi)..."):
                 try:
                     filename = safe_name(pdf_doc.name)
-                    vectorstore_path = os.path.join(session_workspace(), filename)
+                    base = ensure_store_dir()
+                    vectorstore_path = os.path.join(base, filename)
 
                     if os.path.exists(vectorstore_path) and not overwrite:
-                        st.warning("Documento già processato in questa workspace. Attiva la sovrascrittura per ri-elaborarlo.")
+                        st.warning("Documento già processato. Attiva la sovrascrittura per ri-elaborarlo.")
                         st.stop()
 
                     raw_text = extract_text_from_pdfs([pdf_doc])
@@ -214,13 +214,17 @@ def main():
                     chunks = chunk_text(raw_text)
                     vs = build_vectorstore(chunks, vectorstore_path)
 
-                    # Salva una copia del PDF accanto all'indice (comodo per anteprima)
+                    # Salva una copia del PDF accanto all'indice (per anteprima)
                     with open(os.path.join(vectorstore_path, "documento.pdf"), "wb") as f:
                         f.write(pdf_doc.getbuffer())
 
                     st.session_state.last_text_preview = raw_text[:3000]
                     st.session_state.conversation = build_chain(vs, st.session_state.llm_temperature)
                     st.session_state.current_index = filename
+
+                    # reset cronologia per la nuova sessione su questo indice
+                    st.session_state.messages = []
+                    st.session_state.last_sources = []
 
                     st.success(f"✅ Documento '{filename}' indicizzato e pronto all'uso!")
                 except Exception as e:
@@ -230,7 +234,7 @@ def main():
     if selected != "-- Nessuno --" and selected != st.session_state.current_index:
         with st.spinner("🔁 Caricamento indice..."):
             try:
-                vectorstore_path = os.path.join(session_workspace(), selected)
+                vectorstore_path = os.path.join(ensure_store_dir(), selected)
                 vs = load_vectorstore(vectorstore_path)
                 st.session_state.conversation = build_chain(vs, st.session_state.llm_temperature)
                 st.session_state.current_index = selected
@@ -241,6 +245,11 @@ def main():
                     with pdfplumber.open(pdf_path) as pdf_file:
                         text = "".join([p.extract_text() or "" for p in pdf_file.pages])
                         st.session_state.last_text_preview = text[:3000]
+
+                # reset della chat quando cambi indice
+                st.session_state.messages = []
+                st.session_state.last_sources = []
+
             except Exception as e:
                 st.error(f"❌ Errore nel caricamento dell'indice: {e}")
 
@@ -265,24 +274,33 @@ def main():
         else:
             with st.spinner("🧠 Elaborazione..."):
                 try:
+                    # 1) salva la domanda dell'utente
+                    st.session_state.messages.append({"role": "user", "content": user_question})
+
+                    # 2) esegui la chain
                     response = st.session_state.conversation({"question": user_question})
-                    st.session_state.chat_history = response["chat_history"]
+                    answer = response["answer"]
 
-                    # Chat history
-                    for i, msg in enumerate(st.session_state.chat_history):
-                        html = USER_TEMPLATE.format(msg=msg.content) if i % 2 == 0 else BOT_TEMPLATE.format(msg=msg.content)
-                        st.markdown(html, unsafe_allow_html=True)
+                    # 3) salva la risposta del bot e le fonti usate
+                    st.session_state.messages.append({"role": "assistant", "content": answer})
+                    st.session_state.last_sources = response.get("source_documents", [])
 
-                    # Sorgenti
-                    if "source_documents" in response and response["source_documents"]:
-                        with st.expander("🔍 Contenuti utilizzati per la risposta"):
-                            for i, doc in enumerate(response["source_documents"]):
-                                st.markdown(f"**Chunk {i+1}:**\n\n{doc.page_content}\n\n---")
-
-                    # Risposta finale
-                    st.markdown(BOT_TEMPLATE.format(msg=response["answer"]), unsafe_allow_html=True)
                 except Exception as e:
                     st.error(f"❌ Errore durante la risposta: {e}")
+
+    # --- RENDER COMPLETO DELLA CHAT (persistente) ---
+    if st.session_state.get("messages"):
+        for msg in st.session_state.messages:
+            if msg["role"] == "user":
+                st.markdown(USER_TEMPLATE.format(msg=msg["content"]), unsafe_allow_html=True)
+            else:
+                st.markdown(BOT_TEMPLATE.format(msg=msg["content"]), unsafe_allow_html=True)
+
+        # Mostra le fonti dell'ULTIMA risposta
+        if st.session_state.get("last_sources"):
+            with st.expander("🔍 Contenuti utilizzati per l'ultima risposta"):
+                for i, doc in enumerate(st.session_state.last_sources):
+                    st.markdown(f"**Chunk {i+1}:**\n\n{doc.page_content}\n\n---")
 
     # Informativa rapida
     with st.expander("ℹ️ Note importanti"):
@@ -290,8 +308,8 @@ def main():
             """
 - **Nessun limite di pagine/size**: l'elaborazione di PDF molto grandi può richiedere tempo e generare costi API più alti.
 - **PDF scannerizzati** senza layer di testo potrebbero risultare vuoti: per tali file serve un OCR (opzionale, non incluso in questa versione).
-- **Workspace isolata per sessione**: i tuoi indici non sono visibili ad altri utenti della stessa app.
-- **Persistenza**: su hosting effimeri (es. Streamlit Cloud), i dati possono andare persi al riavvio; per persistenza reale usa uno storage esterno.
+- **Indici PERSISTENTI**: la lista a sinistra mostra tutti gli indici presenti nella cartella globale `vectorstore/`.
+- **Attenzione Streamlit Cloud**: lo storage del provider può essere effimero; per persistenza reale usa uno storage esterno (S3/MinIO/GCS).
             """
         )
 
