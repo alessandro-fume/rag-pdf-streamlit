@@ -7,7 +7,7 @@ import shutil
 import streamlit as st
 import pdfplumber
 from langchain.text_splitter import CharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.memory import ConversationSummaryMemory
 from langchain.chains import ConversationalRetrievalChain
@@ -298,3 +298,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
