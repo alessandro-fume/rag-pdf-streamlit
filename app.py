@@ -347,7 +347,6 @@ def main():
 
 {doc.page_content}
 
----")
 
     # Informativa rapida
     with st.expander("ℹ️ Note importanti"):
@@ -364,5 +363,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
