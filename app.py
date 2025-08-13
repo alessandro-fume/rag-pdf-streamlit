@@ -19,6 +19,11 @@ APP_TITLE = "Chatbot EOS Reply – Gestione Documenti (Web Ready)"
 APP_ICON = "📚"
 BASE_DIR = "vectorstore"  # cartella PERSISTENTE tra esecuzioni per gli indici
 
+# Marker di fiducia per caricare indici in sicurezza
+TRUST_MARK_FILE = ".trusted_by_app"
+TRUST_MARK_VALUE = "EOS-REPLY-RAG-V1"
+LEGACY_PREFIXES = ("ws_",)  # vecchie cartelle create prima di questa versione
+
 # Template semplici inline per evitare dipendenze esterne
 CSS = """
 <style>
@@ -62,9 +67,28 @@ def safe_name(name: str) -> str:
     return stem[:64] or "doc"
 
 
+def _has_trust_mark(dir_path: str) -> bool:
+    mark_path = os.path.join(dir_path, TRUST_MARK_FILE)
+    try:
+        if os.path.exists(mark_path):
+            with open(mark_path, "r", encoding="utf-8") as f:
+                return f.read().strip() == TRUST_MARK_VALUE
+    except Exception:
+        return False
+    return False
+
+
 def list_indices() -> list:
     base = ensure_store_dir()
-    return [d.name for d in os.scandir(base) if d.is_dir()] if os.path.exists(base) else []
+    items = []
+    if os.path.exists(base):
+        for d in os.scandir(base):
+            if d.is_dir():
+                # Mostra indici "trusted" o legacy (ws_*)
+                if _has_trust_mark(d.path) or any(d.name.startswith(p) for p in LEGACY_PREFIXES):
+                    items.append(d.name)
+    # Ordina alfabeticamente per comodità
+    return sorted(items)
 
 
 # =============================
@@ -87,7 +111,8 @@ def extract_text_from_pdfs(pdfs) -> str:
 
 def chunk_text(text: str):
     splitter = CharacterTextSplitter(
-        separator="\n",
+        separator="
+",
         chunk_size=1000,    # chunk più grandi per documenti estesi
         chunk_overlap=100,  # piccolo overlap
         length_function=len,
@@ -104,12 +129,24 @@ def build_vectorstore(chunks, path: str):
     vs = FAISS.from_texts(texts=chunks, embedding=embeddings)
     os.makedirs(path, exist_ok=True)
     vs.save_local(path)
+    # Scrivi il marker di fiducia per riconoscere che l'indice è stato creato da questa app
+    try:
+        with open(os.path.join(path, TRUST_MARK_FILE), "w", encoding="utf-8") as f:
+            f.write(TRUST_MARK_VALUE)
+    except Exception:
+        pass
     return vs
 
 
 @st.cache_resource(show_spinner=False)
 def load_vectorstore(path: str):
-    return FAISS.load_local(path, OpenAIEmbeddings(), allow_dangerous_deserialization=False)
+    name = os.path.basename(path)
+    # Consenti il caricamento SOLO se la cartella è marcata come nostra o è legacy (ws_*)
+    if not (_has_trust_mark(path) or any(name.startswith(p) for p in LEGACY_PREFIXES)):
+        st.error("Per sicurezza, l'indice selezionato non è riconosciuto come creato da questa app.")
+        st.stop()
+    # Abilita la deserializzazione "pericolosa" SOLO su indici che arrivano da questa app
+    return FAISS.load_local(path, OpenAIEmbeddings(), allow_dangerous_deserialization=True)
 
 
 def build_chain(vectorstore, temperature: float):
@@ -215,8 +252,11 @@ def main():
                     vs = build_vectorstore(chunks, vectorstore_path)
 
                     # Salva una copia del PDF accanto all'indice (per anteprima)
-                    with open(os.path.join(vectorstore_path, "documento.pdf"), "wb") as f:
-                        f.write(pdf_doc.getbuffer())
+                    try:
+                        with open(os.path.join(vectorstore_path, "documento.pdf"), "wb") as f:
+                            f.write(pdf_doc.getbuffer())
+                    except Exception:
+                        pass
 
                     st.session_state.last_text_preview = raw_text[:3000]
                     st.session_state.conversation = build_chain(vs, st.session_state.llm_temperature)
@@ -242,9 +282,12 @@ def main():
 
                 pdf_path = os.path.join(vectorstore_path, "documento.pdf")
                 if os.path.exists(pdf_path):
-                    with pdfplumber.open(pdf_path) as pdf_file:
-                        text = "".join([p.extract_text() or "" for p in pdf_file.pages])
-                        st.session_state.last_text_preview = text[:3000]
+                    try:
+                        with pdfplumber.open(pdf_path) as pdf_file:
+                            text = "".join([p.extract_text() or "" for p in pdf_file.pages])
+                            st.session_state.last_text_preview = text[:3000]
+                    except Exception:
+                        st.session_state.last_text_preview = ""
 
                 # reset della chat quando cambi indice
                 st.session_state.messages = []
@@ -300,7 +343,11 @@ def main():
         if st.session_state.get("last_sources"):
             with st.expander("🔍 Contenuti utilizzati per l'ultima risposta"):
                 for i, doc in enumerate(st.session_state.last_sources):
-                    st.markdown(f"**Chunk {i+1}:**\n\n{doc.page_content}\n\n---")
+                    st.markdown(f"**Chunk {i+1}:**
+
+{doc.page_content}
+
+---")
 
     # Informativa rapida
     with st.expander("ℹ️ Note importanti"):
@@ -308,8 +355,9 @@ def main():
             """
 - **Nessun limite di pagine/size**: l'elaborazione di PDF molto grandi può richiedere tempo e generare costi API più alti.
 - **PDF scannerizzati** senza layer di testo potrebbero risultare vuoti: per tali file serve un OCR (opzionale, non incluso in questa versione).
-- **Indici PERSISTENTI**: la lista a sinistra mostra tutti gli indici presenti nella cartella globale `vectorstore/`.
-- **Attenzione Streamlit Cloud**: lo storage del provider può essere effimero; per persistenza reale usa uno storage esterno (S3/MinIO/GCS).
+- **Indici PERSISTENTI**: la lista a sinistra mostra gli indici creati da questa app (o legacy `ws_*`).
+- **Sicurezza**: il caricamento di indici abilita la deserializzazione solo per cartelle marcate come "trusted" o legacy note.
+- **Persistenza Cloud**: su Streamlit Cloud lo storage può essere effimero; per persistenza reale usa uno storage esterno (S3/MinIO/GCS).
             """
         )
 
