@@ -348,21 +348,23 @@ def main():
 {doc.page_content}
 
 
-    # Informativa rapida
-            with st.expander("ℹ️ Note importanti"):
-        st.markdown(
-            """
+# Informativa rapida
+with st.expander("ℹ️ Note importanti"):
+    st.markdown(
+        """
 - **Nessun limite di pagine/size**: l'elaborazione di PDF molto grandi può richiedere tempo e generare costi API più alti.
 - **PDF scannerizzati** senza layer di testo potrebbero risultare vuoti: per tali file serve un OCR (opzionale, non incluso in questa versione).
 - **Indici PERSISTENTI**: la lista a sinistra mostra gli indici creati da questa app (o legacy `ws_*`).
 - **Sicurezza**: il caricamento di indici abilita la deserializzazione solo per cartelle marcate come "trusted" o legacy note.
 - **Persistenza Cloud**: su Streamlit Cloud lo storage può essere effimero; per persistenza reale usa uno storage esterno (S3/MinIO/GCS).
-            """
-        )
+        """
+    )
+
 
 
 if __name__ == "__main__":
     main()
+
 
 
 
