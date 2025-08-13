@@ -349,7 +349,7 @@ def main():
 
 
     # Informativa rapida
-    with st.expander("ℹ️ Note importanti"):
+            with st.expander("ℹ️ Note importanti"):
         st.markdown(
             """
 - **Nessun limite di pagine/size**: l'elaborazione di PDF molto grandi può richiedere tempo e generare costi API più alti.
@@ -363,6 +363,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
