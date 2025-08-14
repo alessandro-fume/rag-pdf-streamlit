@@ -3,6 +3,8 @@ import re
 import json
 import pathlib
 import shutil
+from datetime import datetime
+
 import streamlit as st
 import pdfplumber
 from langchain.text_splitter import CharacterTextSplitter
@@ -18,13 +20,15 @@ from langchain.schema import Document
 # =============================
 APP_TITLE = "Chatbot EOS Reply – PDF Documents"
 FAVICON_PATH = "logo_favicon.png"   # quadrata, ottimizzata per tab browser
-LOGO_PATH = "logo_eos_reply.png"    # logo in pagina/sidebar (orizzontale)
-APP_ICON_FALLBACK = "📚"
+LOGO_PATH   = "logo_eos_reply.png"  # logo in pagina/sidebar (orizzontale)
 
 BASE_DIR = "vectorstore"
 TRUST_MARK_FILE = ".trusted_by_app"
 TRUST_MARK_VALUE = "EOS-REPLY-RAG-V1"
 LEGACY_PREFIXES = ("ws_",)
+
+# Persistenza conversazioni (locale per indice)
+CONV_SUBDIR = "conversations"  # vectorstore/<index>/conversations/<conv_id>.json
 
 # =============================
 # Stili e template
@@ -101,6 +105,53 @@ def list_indices() -> list:
                 items.append(d.name)
     return sorted(items)
 
+# ======= Persistenza conversazioni (per indice) =======
+def ensure_conv_dir(index: str) -> str:
+    base = ensure_store_dir()
+    conv_dir = os.path.join(base, index, CONV_SUBDIR)
+    os.makedirs(conv_dir, exist_ok=True)
+    return conv_dir
+
+def conv_file_path(index: str, conv_id: str) -> str:
+    return os.path.join(ensure_conv_dir(index), f"{conv_id}.json")
+
+def new_conv_id() -> str:
+    # es: 2025-08-14_10-32-05
+    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+def list_conversations(index: str) -> list[tuple[str, str]]:
+    """
+    Ritorna lista di tuple (conv_id, label_leggibile) ordinate per data decrescente.
+    Label default = conv_id con sostituzioni estetiche.
+    """
+    conv_dir = ensure_conv_dir(index)
+    items = []
+    for f in os.scandir(conv_dir):
+        if f.is_file() and f.name.endswith(".json"):
+            conv_id = f.name[:-5]
+            # label leggibile tipo "2025-08-14 10:32:05"
+            label = conv_id.replace("_", " ").replace("-", ":")
+            items.append((conv_id, label))
+    return sorted(items, key=lambda x: x[0], reverse=True)
+
+def load_chat(index: str, conv_id: str) -> list[dict]:
+    p = conv_file_path(index, conv_id)
+    if os.path.exists(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_chat(index: str, conv_id: str, messages: list[dict]) -> None:
+    p = conv_file_path(index, conv_id)
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(messages, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
 # =============================
 # PDF → Documents con metadati pagina
 # =============================
@@ -140,7 +191,6 @@ def documents_from_pdf_with_pages(uploaded_pdf) -> list[Document]:
 # Vector store & chain
 # =============================
 def build_vectorstore_from_documents(docs, path: str):
-    # embeddings espliciti per coerenza tra salvataggio e caricamento
     embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
     vs = FAISS.from_documents(docs, embedding=embeddings)
     os.makedirs(path, exist_ok=True)
@@ -223,6 +273,7 @@ def main():
         "llm_temperature": 0.3,
         "messages": [],
         "last_sources": [],
+        "conv_id": None,  # ID della conversazione attiva per l'indice corrente
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -232,12 +283,53 @@ def main():
     with st.sidebar:
         if os.path.exists(LOGO_PATH):
             st.image(LOGO_PATH, width=120)
+
         st.subheader("⚙️ Impostazioni")
         st.session_state.llm_temperature = st.slider("Temperatura del modello", 0.0, 1.0, 0.5, step=0.1)
 
         st.subheader("📁 Indici disponibili (persistenti)")
         indices = list_indices()
         selected = st.selectbox("Scegli un documento indicizzato", options=["-- Nessuno --"] + indices)
+
+        # Archivio conversazioni (per indice selezionato)
+        if selected != "-- Nessuno --":
+            with st.expander("🗂️ Archivio conversazioni"):
+                convs = list_conversations(selected)
+                if not convs:
+                    st.caption("Nessuna conversazione salvata per questo documento.")
+                else:
+                    labels = [lbl for _, lbl in convs]
+                    ids    = [cid for cid, _ in convs]
+                    # default: se c'è già conv_id attivo, selezionalo
+                    try:
+                        default_ix = ids.index(st.session_state.conv_id) if st.session_state.conv_id in ids else 0
+                    except Exception:
+                        default_ix = 0
+                    pick_ix = st.selectbox("Seleziona una conversazione:", options=range(len(ids)),
+                                           format_func=lambda i: labels[i], index=default_ix)
+                    col_a, col_b, col_c = st.columns(3)
+                    with col_a:
+                        if st.button("Apri"):
+                            st.session_state.conv_id = ids[pick_ix]
+                            st.session_state.messages = load_chat(selected, st.session_state.conv_id)
+                            st.experimental_rerun()
+                    with col_b:
+                        if st.button("Nuova"):
+                            st.session_state.conv_id = new_conv_id()
+                            st.session_state.messages = []
+                            save_chat(selected, st.session_state.conv_id, st.session_state.messages)
+                            st.experimental_rerun()
+                    with col_c:
+                        if st.button("Elimina"):
+                            p = conv_file_path(selected, ids[pick_ix])
+                            try:
+                                os.remove(p)
+                                if st.session_state.conv_id == ids[pick_ix]:
+                                    st.session_state.conv_id = None
+                                    st.session_state.messages = []
+                                st.experimental_rerun()
+                            except Exception as e:
+                                st.error(f"Errore eliminazione: {e}")
 
         # Elimina indice
         if selected != "-- Nessuno --":
@@ -259,6 +351,7 @@ def main():
                             "confirm_delete": False,
                             "messages": [],
                             "last_sources": [],
+                            "conv_id": None,
                         })
                         st.rerun()
                     except Exception as e:
@@ -296,15 +389,16 @@ def main():
                     except Exception:
                         pass
 
-                    # 4) Aggiorna stato + reset completo sessione (punto 2)
+                    # 4) Aggiorna stato + reset completo sessione
                     preview_text = "\n".join([d.page_content for d in docs[:4]])  # piccola anteprima
                     st.session_state.last_text_preview = preview_text[:3000]
                     st.session_state.conversation = build_chain(vs, st.session_state.llm_temperature)
                     st.session_state.current_index = filename
                     st.session_state.messages = []
                     st.session_state.last_sources = []
-                    # pulizia input
-                    st.session_state.pop("user_q", None)
+                    # nuova conversazione per questo indice
+                    st.session_state.conv_id = new_conv_id()
+                    save_chat(st.session_state.current_index, st.session_state.conv_id, st.session_state.messages)
 
                     st.success(f"✅ Documento '{filename}' indicizzato e pronto all'uso!")
                 except Exception as e:
@@ -328,11 +422,17 @@ def main():
                     except Exception:
                         st.session_state.last_text_preview = ""
 
-                # Reset completo sessione e input (punto 2)
-                st.session_state.messages = []
-                st.session_state.last_sources = []
-                st.session_state.pop("user_q", None)
+                # Reset sessione + apri l'ultima conversazione disponibile (se presente) o creane una nuova
+                convs = list_conversations(selected)
+                if convs:
+                    st.session_state.conv_id = convs[0][0]  # la più recente
+                    st.session_state.messages = load_chat(selected, st.session_state.conv_id)
+                else:
+                    st.session_state.conv_id = new_conv_id()
+                    st.session_state.messages = []
+                    save_chat(selected, st.session_state.conv_id, st.session_state.messages)
 
+                st.session_state.last_sources = []
                 st.success(f"✅ Indice '{selected}' caricato!")
             except Exception as e:
                 st.error(f"❌ Errore nel caricamento dell'indice: {e}")
@@ -350,7 +450,7 @@ def main():
 
     # ---------- Input domanda (FORM: si svuota automaticamente) ----------
     with st.form("qa_form", clear_on_submit=True):
-        user_question = st.text_input("Fai una domanda sul documento selezionato:", key="user_q")
+        user_question = st.text_input("Fai una domanda sul documento selezionato:")
         submitted = st.form_submit_button("Invia")
 
     if submitted and user_question and user_question.strip():
@@ -368,6 +468,9 @@ def main():
                     # 3) salva la risposta e le fonti
                     st.session_state.messages.append({"role": "assistant", "content": answer})
                     st.session_state.last_sources = response.get("source_documents", [])
+                    # 4) persisti conversazione
+                    if st.session_state.current_index and st.session_state.conv_id:
+                        save_chat(st.session_state.current_index, st.session_state.conv_id, st.session_state.messages)
                 except Exception as e:
                     st.error(f"❌ Errore durante la risposta: {e}")
 
@@ -399,6 +502,7 @@ def main():
 - Puoi caricare PDF di qualsiasi dimensione (i file molto grandi potrebbero richiedere più tempo).
 - I PDF scannerizzati (solo immagine) potrebbero non contenere testo ricercabile.
 - I documenti indicizzati restano disponibili finché l'app rimane attiva.
+- Le conversazioni vengono salvate localmente per documento (Archivio conversazioni nella sidebar).
             """
         )
 
