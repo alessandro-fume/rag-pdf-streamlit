@@ -158,7 +158,7 @@ def render_header():
     if os.path.exists(LOGO_PATH):
         col1, col2 = st.columns([0.12, 0.88])
         with col1:
-            st.image(LOGO_PATH, width=120)
+            st.image(LOGO_PATH, width=160)
         with col2:
             st.markdown(
                 f"<h1 style='margin-top:0.2rem; margin-bottom:0.2rem;'>{APP_TITLE}</h1>",
@@ -340,4 +340,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
