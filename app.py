@@ -298,7 +298,6 @@ def _build_auth_params_from_secrets():
 def do_login():
     st.set_page_config(page_title=APP_TITLE, page_icon=FAVICON_PATH)
     st.markdown(CSS, unsafe_allow_html=True)
-    render_header()
 
     # Costruisci parametri mutabili dai secrets
     credentials, cookie_name, cookie_key, cookie_expiry_days, preauthorized = _build_auth_params_from_secrets()
@@ -328,30 +327,29 @@ def do_login():
             key="Login"
         )
     except TypeError:
-        # vecchie firme che non accettano 'fields' o keyword
         try:
             result = authenticator.login("main")
         except TypeError:
-            # antichissima: ('Login','main')
             result = authenticator.login("Login", "main")
 
     if isinstance(result, tuple):
-        # Versioni che ritornano (name, auth_status, username)
         name, auth_status, username = result
     else:
-        # Versioni che non ritornano nulla e scrivono in session_state
         name = st.session_state.get("name")
         auth_status = st.session_state.get("authentication_status")
         username = st.session_state.get("username")
 
+    # Se NON autenticato, mostra header + messaggi e ferma la pagina
     if auth_status is False:
+        render_header()
         st.error("Username/Password non corretti.")
         st.stop()
     if auth_status is None:
+        render_header()
         st.info("Inserisci le credenziali per accedere.")
         st.stop()
 
-    # Logged in
+    # Se autenticato, niente header qui (lo renderizza main_app)
     authenticator.logout("Logout", "sidebar")
     return name, username, authenticator
 
@@ -606,3 +604,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
