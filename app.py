@@ -162,6 +162,16 @@ def save_chat(user_slug: str, index: str, conv_id: str, messages: list[dict]) ->
     except Exception:
         pass
 
+def safe_rerun():
+    """Compat per Streamlit versioni diverse."""
+    try:
+        st.rerun()
+    except Exception:
+        try:
+            st.experimental_rerun()
+        except Exception:
+            pass
+
 # =============================
 # PDF → Documents con metadati pagina
 # =============================
@@ -208,7 +218,6 @@ def build_vectorstore_from_documents(docs, path: str):
 
 @st.cache_resource(show_spinner=False)
 def load_vectorstore(path: str):
-    name = os.path.basename(path)
     # NB: il check qui non ha accesso a user, ma resta valido come sicurezza file-level
     embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
     return FAISS.load_local(path, embeddings, allow_dangerous_deserialization=True)
@@ -253,6 +262,38 @@ def render_header():
         st.title(APP_TITLE)
 
 # =============================
+# AUTH helpers
+# =============================
+def _build_auth_params_from_secrets():
+    """Converte st.secrets (read-only) in dict/list mutabili per streamlit-authenticator."""
+    auth_sec = st.secrets.get("auth", None)
+    if not auth_sec:
+        st.error("Configurazione autenticazione assente in st.secrets['auth'].")
+        st.stop()
+
+    # credentials.usernames -> dict mutabile
+    usernames = {}
+    creds = auth_sec.get("credentials", {}).get("usernames", {})
+    for uname, u in creds.items():
+        usernames[str(uname)] = {
+            "name": str(u["name"]),
+            "email": str(u["email"]),
+            "password": str(u["password"]),
+        }
+    credentials = {"usernames": usernames}
+
+    cookie_name = str(auth_sec.get("cookie_name", "eos_reply_chatbot"))
+    cookie_key  = str(auth_sec.get("cookie_key",  "PLEASE_SET_A_RANDOM_SECRET"))
+    cookie_expiry_days = int(auth_sec.get("cookie_expiry_days", 30))
+
+    preauthorized = {}
+    if "preauthorized" in auth_sec:
+        emails = [str(e) for e in auth_sec["preauthorized"].get("emails", [])]
+        preauthorized = {"emails": emails}
+
+    return credentials, cookie_name, cookie_key, cookie_expiry_days, preauthorized
+
+# =============================
 # AUTH
 # =============================
 def do_login():
@@ -260,27 +301,32 @@ def do_login():
     st.markdown(CSS, unsafe_allow_html=True)
     render_header()
 
-    # Config da secrets
-    auth_secrets = st.secrets.get("auth", None)
-    if not auth_secrets:
-        st.error("Configurazione autenticazione assente in st.secrets['auth'].")
-        st.stop()
+    # Costruisci parametri mutabili dai secrets
+    credentials, cookie_name, cookie_key, cookie_expiry_days, preauthorized = _build_auth_params_from_secrets()
 
-    credentials = auth_secrets.get("credentials", {})
-    cookie_name = auth_secrets.get("cookie_name", "eos_reply_chatbot")
-    cookie_key  = auth_secrets.get("cookie_key",  "PLEASE_SET_A_RANDOM_SECRET")
-    cookie_expiry_days = auth_secrets.get("cookie_expiry_days", 30)
-    preauthorized = auth_secrets.get("preauthorized", {})
+    # Istanzia Authenticate con compatibilità firme diverse
+    try:
+        authenticator = stauth.Authenticate(
+            credentials=credentials,
+            cookie_name=cookie_name,
+            key=cookie_key,
+            cookie_expiry_days=cookie_expiry_days,
+            preauthorized=preauthorized
+        )
+    except TypeError:
+        # Alcune versioni accettano un dict "cookie"
+        cookie = {"name": cookie_name, "key": cookie_key, "expiry_days": cookie_expiry_days}
+        try:
+            authenticator = stauth.Authenticate(credentials, cookie, preauthorized)
+        except TypeError:
+            # Fallback ulteriore (vecchie versioni)
+            authenticator = stauth.Authenticate(credentials, cookie_name, cookie_key, cookie_expiry_days, preauthorized)
 
-    authenticator = stauth.Authenticate(
-        credentials=credentials,
-        cookie_name=cookie_name,
-        key=cookie_key,
-        cookie_expiry_days=cookie_expiry_days,
-        preauthorized=preauthorized
+    # Login
+    name, auth_status, username = authenticator.login(
+        "main",
+        fields={"Form name": "Login", "Username": "Username", "Password": "Password"}
     )
-
-    name, auth_status, username = authenticator.login("main", fields={"Form name":"Login", "Username":"Username", "Password":"Password"})
     if auth_status is False:
         st.error("Username/Password non corretti.")
         st.stop()
@@ -352,13 +398,13 @@ def main_app(user_name: str, user_username: str):
                         if st.button("Apri"):
                             st.session_state.conv_id = ids[pick_ix]
                             st.session_state.messages = load_chat(user_slug, selected, st.session_state.conv_id)
-                            st.experimental_rerun()
+                            safe_rerun()
                     with col_b:
                         if st.button("Nuova"):
                             st.session_state.conv_id = new_conv_id()
                             st.session_state.messages = []
                             save_chat(user_slug, selected, st.session_state.conv_id, st.session_state.messages)
-                            st.experimental_rerun()
+                            safe_rerun()
                     with col_c:
                         if st.button("Elimina"):
                             p = conv_file_path(user_slug, selected, ids[pick_ix])
@@ -367,7 +413,7 @@ def main_app(user_name: str, user_username: str):
                                 if st.session_state.conv_id == ids[pick_ix]:
                                     st.session_state.conv_id = None
                                     st.session_state.messages = []
-                                st.experimental_rerun()
+                                safe_rerun()
                             except Exception as e:
                                 st.error(f"Errore eliminazione: {e}")
 
@@ -392,7 +438,7 @@ def main_app(user_name: str, user_username: str):
                             "last_sources": [],
                             "conv_id": None,
                         })
-                        st.rerun()
+                        safe_rerun()
                     except Exception as e:
                         st.error(f"Errore durante l'eliminazione: {e}")
                         st.session_state.confirm_delete = False
