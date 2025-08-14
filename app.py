@@ -218,7 +218,6 @@ def build_vectorstore_from_documents(docs, path: str):
 
 @st.cache_resource(show_spinner=False)
 def load_vectorstore(path: str):
-    # NB: il check qui non ha accesso a user, ma resta valido come sicurezza file-level
     embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
     return FAISS.load_local(path, embeddings, allow_dangerous_deserialization=True)
 
@@ -314,19 +313,37 @@ def do_login():
             preauthorized=preauthorized
         )
     except TypeError:
-        # Alcune versioni accettano un dict "cookie"
         cookie = {"name": cookie_name, "key": cookie_key, "expiry_days": cookie_expiry_days}
         try:
             authenticator = stauth.Authenticate(credentials, cookie, preauthorized)
         except TypeError:
-            # Fallback ulteriore (vecchie versioni)
             authenticator = stauth.Authenticate(credentials, cookie_name, cookie_key, cookie_expiry_days, preauthorized)
 
-    # Login
-    name, auth_status, username = authenticator.login(
-        "main",
-        fields={"Form name": "Login", "Username": "Username", "Password": "Password"}
-    )
+    # --- Login (compat con versioni nuove/vecchie) ---
+    result = None
+    try:
+        result = authenticator.login(
+            location="main",
+            fields={"Form name": "Login", "Username": "Username", "Password": "Password"},
+            key="Login"
+        )
+    except TypeError:
+        # vecchie firme che non accettano 'fields' o keyword
+        try:
+            result = authenticator.login("main")
+        except TypeError:
+            # antichissima: ('Login','main')
+            result = authenticator.login("Login", "main")
+
+    if isinstance(result, tuple):
+        # Versioni che ritornano (name, auth_status, username)
+        name, auth_status, username = result
+    else:
+        # Versioni che non ritornano nulla e scrivono in session_state
+        name = st.session_state.get("name")
+        auth_status = st.session_state.get("authentication_status")
+        username = st.session_state.get("username")
+
     if auth_status is False:
         st.error("Username/Password non corretti.")
         st.stop()
