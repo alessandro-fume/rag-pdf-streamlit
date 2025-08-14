@@ -14,6 +14,7 @@ from langchain.chains import ConversationalRetrievalChain
 # Branding / impostazioni base
 # =============================
 APP_TITLE = "Chatbot EOS Reply – PDF Documents"
+FAVICON_PATH = "logo_favicon.png"   # quadrata, ottimizzata per tab browser
 LOGO_PATH = "logo_eos_reply.png"     # <-- metti questo file accanto ad app.py (png/jpg)
 APP_ICON_FALLBACK = "📚"
 
@@ -171,7 +172,7 @@ def render_header():
 # App
 # =============================
 def main():
-    st.set_page_config(page_title=APP_TITLE, page_icon=_load_page_icon())
+    st.set_page_config(page_title=APP_TITLE, page_icon=FAVICON_PATH)
     get_openai_key_from_secrets()
     st.markdown(CSS, unsafe_allow_html=True)
     render_header()
@@ -340,5 +341,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
