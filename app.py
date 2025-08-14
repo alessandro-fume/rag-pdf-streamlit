@@ -12,7 +12,7 @@ from langchain_community.vectorstores import FAISS
 from langchain.memory import ConversationSummaryMemory
 from langchain.chains import ConversationalRetrievalChain
 
-APP_TITLE = "Chatbot EOS Reply – Gestione Documenti (Web Ready)"
+APP_TITLE = "Chatbot EOS Reply – PDF Documents"
 APP_ICON = "📚"
 BASE_DIR = "vectorstore"
 TRUST_MARK_FILE = ".trusted_by_app"
@@ -249,3 +249,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
