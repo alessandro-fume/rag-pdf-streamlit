@@ -6,3 +6,4 @@ langchain_openai
 langchain-community
 faiss-cpu>=1.8
 tiktoken>=0.7
+streamlit-authenticator>=0.3.1
