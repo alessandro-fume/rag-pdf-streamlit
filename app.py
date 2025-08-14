@@ -10,24 +10,47 @@ from langchain_community.vectorstores import FAISS
 from langchain.memory import ConversationSummaryMemory
 from langchain.chains import ConversationalRetrievalChain
 
+# =============================
+# Branding / impostazioni base
+# =============================
 APP_TITLE = "Chatbot EOS Reply – PDF Documents"
-APP_ICON = "📚"
+# Se metti il file del logo nel repo, rinominalo così o aggiorna il percorso qui.
+LOGO_PATH = "logo_eos_reply.png"   # oppure .jpg
+APP_ICON_FALLBACK = "📚"
+
 BASE_DIR = "vectorstore"
 TRUST_MARK_FILE = ".trusted_by_app"
 TRUST_MARK_VALUE = "EOS-REPLY-RAG-V1"
 LEGACY_PREFIXES = ("ws_",)
 
+# =============================
+# Stili e template
+# =============================
 CSS = """
 <style>
     .chat-msg { padding: 0.75rem 1rem; border-radius: 12px; margin: 0.25rem 0; }
     .user { background: #eef6ff; border: 1px solid #cfe4ff; }
-    .bot { background: #f7f7ff; border: 1px solid #e5e5ff; }
-    .msg { white-space: pre-wrap; }
-    .muted { color: #6b7280; font-size: 0.9rem; }
+    .bot  { background: #f7f7ff; border: 1px solid #e5e5ff; }
+    .msg  { white-space: pre-wrap; }
+    .muted{ color: #6b7280; font-size: 0.9rem; }
 </style>
 """
 USER_TEMPLATE = """<div class="chat-msg user"><div class="msg">{msg}</div></div>"""
-BOT_TEMPLATE = """<div class="chat-msg bot"><div class="msg">{msg}</div></div>"""
+BOT_TEMPLATE  = """<div class="chat-msg bot"><div class="msg">{msg}</div></div>"""
+
+# =============================
+# Utility
+# =============================
+def _load_page_icon():
+    """Prova a caricare il logo aziendale per l'icona della pagina.
+    Se non disponibile/leggibile, torna all'emoji di fallback."""
+    try:
+        if os.path.exists(LOGO_PATH):
+            from PIL import Image  # lazy import per non fallire se Pillow non c'è
+            return Image.open(LOGO_PATH)
+    except Exception:
+        pass
+    return APP_ICON_FALLBACK
 
 def get_openai_key_from_secrets() -> str:
     key = st.secrets.get("OPENAI_API_KEY")
@@ -65,6 +88,9 @@ def list_indices() -> list:
                 items.append(d.name)
     return sorted(items)
 
+# =============================
+# PDF → testo
+# =============================
 def extract_text_from_pdfs(pdfs) -> str:
     text = ""
     for pdf in pdfs:
@@ -85,6 +111,9 @@ def chunk_text(text: str):
     )
     return splitter.split_text(text)
 
+# =============================
+# Vector store & chain
+# =============================
 def build_vectorstore(chunks, path: str):
     embeddings = OpenAIEmbeddings()
     vs = FAISS.from_texts(texts=chunks, embedding=embeddings)
@@ -107,7 +136,13 @@ def load_vectorstore(path: str):
 
 def build_chain(vectorstore, temperature: float):
     llm = ChatOpenAI(temperature=temperature, model_name="gpt-3.5-turbo")
-    memory = ConversationSummaryMemory(llm=llm, memory_key="chat_history", input_key="question", output_key="answer", return_messages=True)
+    memory = ConversationSummaryMemory(
+        llm=llm,
+        memory_key="chat_history",
+        input_key="question",
+        output_key="answer",
+        return_messages=True
+    )
     return ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=vectorstore.as_retriever(),
@@ -116,13 +151,16 @@ def build_chain(vectorstore, temperature: float):
         output_key="answer",
     )
 
+# =============================
+# App
+# =============================
 def main():
-    st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON)
+    st.set_page_config(page_title=APP_TITLE, page_icon=_load_page_icon())
     get_openai_key_from_secrets()
     st.markdown(CSS, unsafe_allow_html=True)
     st.title(APP_TITLE)
 
-    # stato
+    # Stato
     defaults = {
         "conversation": None,
         "chat_history": None,
@@ -132,13 +170,13 @@ def main():
         "llm_temperature": 0.3,
         "messages": [],
         "last_sources": [],
-        "__clear_user_q": False,   # <-- flag per pulizia input PRIMA di creare il widget
+        "__clear_user_q": False,  # flag per tentare lo svuotamento del box
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
-    # se dobbiamo pulire, rimuoviamo la chiave PRIMA di creare il text_input
+    # Se dobbiamo pulire, rimuoviamo la chiave PRIMA di creare il text_input
     if st.session_state.__clear_user_q:
         if "user_q" in st.session_state:
             del st.session_state["user_q"]
@@ -219,18 +257,17 @@ def main():
                     with pdfplumber.open(pdf_path) as pdf_file:
                         text = "".join([p.extract_text() or "" for p in pdf_file.pages])
                         st.session_state.last_text_preview = text[:3000]
+                st.success(f"✅ Indice '{selected}' caricato!")
                 st.session_state.messages = []
                 st.session_state.last_sources = []
-                st.success(f"✅ Indice '{selected}' caricato!")
             except Exception as e:
                 st.error(f"❌ Errore nel caricamento dell'indice: {e}")
 
-    # ---------- Anteprima testo ----------
+    # ---------- Anteprima/Suggerimenti ----------
     if st.session_state.last_text_preview:
         with st.expander("📄 Anteprima testo estratto"):
             st.text_area("Testo", value=st.session_state.last_text_preview, height=240)
 
-    # ---------- Suggerimenti ----------
     if st.session_state.conversation:
         with st.expander("💡 Suggerimenti di domande"):
             st.markdown("- **Qual è l’argomento principale del documento?**")
@@ -255,7 +292,7 @@ def main():
                 except Exception as e:
                     st.error(f"❌ Errore durante la risposta: {e}")
                 finally:
-                    # segnala di pulire l'input PRIMA del prossimo render
+                    # prova a svuotare l'input per il prossimo run
                     st.session_state.__clear_user_q = True
                     st.rerun()
 
@@ -266,20 +303,21 @@ def main():
                 st.markdown(USER_TEMPLATE.format(msg=msg["content"]), unsafe_allow_html=True)
             else:
                 st.markdown(BOT_TEMPLATE.format(msg=msg["content"]), unsafe_allow_html=True)
+
         if st.session_state.get("last_sources"):
             with st.expander("🔍 Contenuti utilizzati per l'ultima risposta"):
                 for i, doc in enumerate(st.session_state.last_sources):
                     st.markdown(f"**Chunk {i+1}:**\n\n{doc.page_content}\n\n---")
 
+    # ---------- Note semplificate per gli utenti ----------
     with st.expander("ℹ️ Note importanti"):
         st.markdown(
             """
-- **Nessun limite di pagine/size**: Puoi caricare PDF di qualsiasi dimensione. L'elaborazione di file molto grandi può richiedere più tempo.
-- **PDF scannerizzati** :I PDF scannerizzati (immagine) potrebbero non contenere testo ricercabile.
-- **Indici PERSISTENTI**: Gli indici dei documenti caricati resteranno disponibili finché l'app rimane attiva.
+- Puoi caricare PDF di qualsiasi dimensione (i file molto grandi potrebbero richiedere più tempo).
+- I PDF scannerizzati (solo immagine) potrebbero non contenere testo ricercabile.
+- I documenti indicizzati restano disponibili finché l'app rimane attiva.
             """
         )
 
 if __name__ == "__main__":
     main()
-
