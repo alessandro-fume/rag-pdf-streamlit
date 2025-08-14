@@ -1,7 +1,5 @@
 import os
 import re
-import time
-import hashlib
 import pathlib
 import shutil
 import streamlit as st
@@ -124,15 +122,37 @@ def main():
     st.markdown(CSS, unsafe_allow_html=True)
     st.title(APP_TITLE)
 
-    defaults = {"conversation": None, "chat_history": None, "last_text_preview": "", "current_index": None, "confirm_delete": False, "llm_temperature": 0.3, "messages": [], "last_sources": []}
+    # stato
+    defaults = {
+        "conversation": None,
+        "chat_history": None,
+        "last_text_preview": "",
+        "current_index": None,
+        "confirm_delete": False,
+        "llm_temperature": 0.3,
+        "messages": [],
+        "last_sources": [],
+        "__clear_user_q": False,   # <-- flag per pulizia input PRIMA di creare il widget
+    }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
+    # se dobbiamo pulire, rimuoviamo la chiave PRIMA di creare il text_input
+    if st.session_state.__clear_user_q:
+        if "user_q" in st.session_state:
+            del st.session_state["user_q"]
+        st.session_state.__clear_user_q = False
+
+    # ---------- Sidebar ----------
     with st.sidebar:
+        st.subheader("⚙️ Impostazioni")
         st.session_state.llm_temperature = st.slider("Temperatura del modello", 0.0, 1.0, 0.3, step=0.1)
+
+        st.subheader("📁 Indici disponibili (persistenti)")
         indices = list_indices()
         selected = st.selectbox("Scegli un documento indicizzato", options=["-- Nessuno --"] + indices)
+
         if selected != "-- Nessuno --":
             col1, col2 = st.columns(2)
             with col1:
@@ -144,14 +164,24 @@ def main():
                     try:
                         shutil.rmtree(os.path.join(ensure_store_dir(), selected))
                         st.success(f"Indice '{selected}' eliminato.")
-                        st.session_state.update({"conversation": None, "last_text_preview": "", "current_index": None, "confirm_delete": False, "messages": [], "last_sources": []})
+                        st.session_state.update({
+                            "conversation": None,
+                            "last_text_preview": "",
+                            "current_index": None,
+                            "confirm_delete": False,
+                            "messages": [],
+                            "last_sources": [],
+                        })
                         st.rerun()
                     except Exception as e:
                         st.error(f"Errore durante l'eliminazione: {e}")
                         st.session_state.confirm_delete = False
+
         st.markdown("---")
+        st.subheader("📤 Carica nuovo PDF da indicizzare")
         pdf_doc = st.file_uploader("Carica un PDF", type=["pdf"], accept_multiple_files=False)
         overwrite = st.checkbox("Sovrascrivi se già esistente", value=False)
+
         if pdf_doc and st.button("Processa e indicizza"):
             with st.spinner("📚 Indicizzazione in corso..."):
                 try:
@@ -177,6 +207,7 @@ def main():
                 except Exception as e:
                     st.error(f"❌ Errore durante l'elaborazione: {e}")
 
+    # ---------- Caricamento indice esistente ----------
     if selected != "-- Nessuno --" and selected != st.session_state.current_index:
         with st.spinner("🔁 Caricamento indice..."):
             try:
@@ -194,18 +225,21 @@ def main():
             except Exception as e:
                 st.error(f"❌ Errore nel caricamento dell'indice: {e}")
 
+    # ---------- Anteprima testo ----------
     if st.session_state.last_text_preview:
         with st.expander("📄 Anteprima testo estratto"):
             st.text_area("Testo", value=st.session_state.last_text_preview, height=240)
 
+    # ---------- Suggerimenti ----------
     if st.session_state.conversation:
         with st.expander("💡 Suggerimenti di domande"):
             st.markdown("- **Qual è l’argomento principale del documento?**")
             st.markdown("- **Fammi un riassunto per avere il contesto.**")
             st.markdown("- **Quali sono i punti chiave trattati?**")
 
-    # === Patch: svuota input in modo sicuro dopo ogni domanda ===
+    # ---------- Input domanda ----------
     user_question = st.text_input("Fai una domanda sul documento selezionato:", key="user_q")
+
     if "user_q" in st.session_state and st.session_state.user_q:
         if not st.session_state.conversation:
             st.warning("⚠️ Seleziona o carica prima un documento.")
@@ -221,10 +255,11 @@ def main():
                 except Exception as e:
                     st.error(f"❌ Errore durante la risposta: {e}")
                 finally:
-                    # pulizia sicura del widget: rimuovi la chiave e rifai il run
-                    st.session_state.pop("user_q", None)
+                    # segnala di pulire l'input PRIMA del prossimo render
+                    st.session_state.__clear_user_q = True
                     st.rerun()
 
+    # ---------- Render chat ----------
     if st.session_state.get("messages"):
         for msg in st.session_state.messages:
             if msg["role"] == "user":
@@ -249,4 +284,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
