@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import pathlib
 import shutil
 import streamlit as st
@@ -9,13 +10,15 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
 from langchain.memory import ConversationSummaryMemory
 from langchain.chains import ConversationalRetrievalChain
+from langchain.prompts import PromptTemplate
+from langchain.schema import Document
 
 # =============================
 # Branding / impostazioni base
 # =============================
 APP_TITLE = "Chatbot EOS Reply – PDF Documents"
 FAVICON_PATH = "logo_favicon.png"   # quadrata, ottimizzata per tab browser
-LOGO_PATH = "logo_eos_reply.png"     # <-- metti questo file accanto ad app.py (png/jpg)
+LOGO_PATH = "logo_eos_reply.png"    # logo in pagina/sidebar (orizzontale)
 APP_ICON_FALLBACK = "📚"
 
 BASE_DIR = "vectorstore"
@@ -40,18 +43,28 @@ USER_TEMPLATE = """<div class="chat-msg user"><div class="msg">{msg}</div></div>
 BOT_TEMPLATE  = """<div class="chat-msg bot"><div class="msg">{msg}</div></div>"""
 
 # =============================
+# Prompt QA anti-hallucinations
+# =============================
+QA_PROMPT = PromptTemplate.from_template("""
+Sei un assistente tecnico. Rispondi SOLO usando il contenuto dei documenti forniti (contesto).
+Regole:
+- Se la domanda richiede una procedura, fornisci TUTTI i passaggi (in elenco numerato).
+- Mantieni la risposta focalizzata, concreta e aderente al testo.
+- Se la risposta è lunga, l'utente può scrivere "continua" per proseguire.
+- Se l'informazione non è presente nei documenti o non sei sicuro, dillo chiaramente.
+- Cita SEMPRE le pagine utilizzate alla fine (es: "Riferimenti: p. 12, 13").
+
+Domanda: {question}
+
+Contesto:
+{context}
+
+Risposta (markdown, includi elenco completo se applicabile):
+""")
+
+# =============================
 # Utility
 # =============================
-def _load_page_icon():
-    """Prova a usare il logo come favicon; se non c'è, usa l'emoji."""
-    try:
-        if os.path.exists(LOGO_PATH):
-            from PIL import Image  # opzionale; se non presente, torna al fallback
-            return Image.open(LOGO_PATH)
-    except Exception:
-        pass
-    return APP_ICON_FALLBACK
-
 def get_openai_key_from_secrets() -> str:
     key = st.secrets.get("OPENAI_API_KEY")
     if not key:
@@ -89,36 +102,50 @@ def list_indices() -> list:
     return sorted(items)
 
 # =============================
-# PDF → testo
+# PDF → Documents con metadati pagina
 # =============================
-def extract_text_from_pdfs(pdfs) -> str:
-    text = ""
-    for pdf in pdfs:
-        try:
-            with pdfplumber.open(pdf) as reader:
-                for page in reader.pages:
-                    text += page.extract_text() or ""
-        except Exception as e:
-            st.warning(f"⚠️ Errore lettura PDF: {e}")
-    return text
-
-def chunk_text(text: str):
+def documents_from_pdf_with_pages(uploaded_pdf) -> list[Document]:
+    """
+    Estrae il testo pagina per pagina e crea Document con metadati:
+    - page: numero pagina (1-based)
+    - source: nome file
+    """
+    docs = []
+    file_name = getattr(uploaded_pdf, "name", "documento.pdf")
     splitter = CharacterTextSplitter(
         separator="\n",
         chunk_size=1000,
         chunk_overlap=100,
         length_function=len,
     )
-    return splitter.split_text(text)
+    try:
+        with pdfplumber.open(uploaded_pdf) as reader:
+            for i, page in enumerate(reader.pages, start=1):
+                text = page.extract_text() or ""
+                if not text.strip():
+                    # se pagina vuota (scansione immagine senza OCR), salta
+                    continue
+                for chunk in splitter.split_text(text):
+                    docs.append(
+                        Document(
+                            page_content=chunk,
+                            metadata={"page": i, "source": file_name}
+                        )
+                    )
+    except Exception as e:
+        st.warning(f"⚠️ Errore lettura PDF: {e}")
+    return docs
 
 # =============================
 # Vector store & chain
 # =============================
-def build_vectorstore(chunks, path: str):
-    embeddings = OpenAIEmbeddings()
-    vs = FAISS.from_texts(texts=chunks, embedding=embeddings)
+def build_vectorstore_from_documents(docs, path: str):
+    # embeddings espliciti per coerenza tra salvataggio e caricamento
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+    vs = FAISS.from_documents(docs, embedding=embeddings)
     os.makedirs(path, exist_ok=True)
     vs.save_local(path)
+    # marker di fiducia
     try:
         with open(os.path.join(path, TRUST_MARK_FILE), "w", encoding="utf-8") as f:
             f.write(TRUST_MARK_VALUE)
@@ -132,10 +159,16 @@ def load_vectorstore(path: str):
     if not (_has_trust_mark(path) or any(name.startswith(p) for p in LEGACY_PREFIXES)):
         st.error("Indice non riconosciuto come creato da questa app.")
         st.stop()
-    return FAISS.load_local(path, OpenAIEmbeddings(), allow_dangerous_deserialization=True)
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+    return FAISS.load_local(path, embeddings, allow_dangerous_deserialization=True)
 
 def build_chain(vectorstore, temperature: float):
-    llm = ChatOpenAI(temperature=temperature, model_name="gpt-3.5-turbo")
+    # LLM con più spazio di output per elenchi completi
+    llm = ChatOpenAI(
+        temperature=0.2,                # più deterministico
+        model_name="gpt-3.5-turbo",
+        max_tokens=900                  # più margine per step lunghi
+    )
     memory = ConversationSummaryMemory(
         llm=llm,
         memory_key="chat_history",
@@ -143,11 +176,14 @@ def build_chain(vectorstore, temperature: float):
         output_key="answer",
         return_messages=True
     )
+    # retriever più “ampio” per aumentare copertura
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
     return ConversationalRetrievalChain.from_llm(
         llm=llm,
-        retriever=vectorstore.as_retriever(),
+        retriever=retriever,
         memory=memory,
         return_source_documents=True,
+        combine_docs_chain_kwargs={"prompt": QA_PROMPT},
         output_key="answer",
     )
 
@@ -187,29 +223,23 @@ def main():
         "llm_temperature": 0.3,
         "messages": [],
         "last_sources": [],
-        "__clear_user_q": False,  # flag per svuotare il box prima del prossimo render
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
-
-    # se dobbiamo pulire, rimuoviamo la chiave PRIMA di creare il text_input
-    if st.session_state.__clear_user_q:
-        if "user_q" in st.session_state:
-            del st.session_state["user_q"]
-        st.session_state.__clear_user_q = False
 
     # ---------- Sidebar ----------
     with st.sidebar:
         if os.path.exists(LOGO_PATH):
             st.image(LOGO_PATH, width=120)
         st.subheader("⚙️ Impostazioni")
-        st.session_state.llm_temperature = st.slider("Temperatura del modello", 0.0, 1.0, 0.3, step=0.1)
+        st.session_state.llm_temperature = st.slider("Temperatura del modello", 0.0, 1.0, 0.5, step=0.1)
 
         st.subheader("📁 Indici disponibili (persistenti)")
         indices = list_indices()
         selected = st.selectbox("Scegli un documento indicizzato", options=["-- Nessuno --"] + indices)
 
+        # Elimina indice
         if selected != "-- Nessuno --":
             col1, col2 = st.columns(2)
             with col1:
@@ -221,6 +251,7 @@ def main():
                     try:
                         shutil.rmtree(os.path.join(ensure_store_dir(), selected))
                         st.success(f"Indice '{selected}' eliminato.")
+                        # Reset totale stato e input
                         st.session_state.update({
                             "conversation": None,
                             "last_text_preview": "",
@@ -234,6 +265,7 @@ def main():
                         st.error(f"Errore durante l'eliminazione: {e}")
                         st.session_state.confirm_delete = False
 
+        # Upload e indicizzazione
         st.markdown("---")
         st.subheader("📤 Carica nuovo PDF da indicizzare")
         pdf_doc = st.file_uploader("Carica un PDF", type=["pdf"], accept_multiple_files=False)
@@ -247,39 +279,61 @@ def main():
                     if os.path.exists(vectorstore_path) and not overwrite:
                         st.warning("Documento già processato.")
                         st.stop()
-                    raw_text = extract_text_from_pdfs([pdf_doc])
-                    if not raw_text.strip():
-                        st.error("❌ Nessun testo leggibile trovato nel PDF.")
+
+                    # 1) Estrai Document con metadati pagina
+                    docs = documents_from_pdf_with_pages(pdf_doc)
+                    if not docs:
+                        st.error("❌ Nessun testo leggibile trovato nel PDF (forse scannerizzato senza OCR).")
                         st.stop()
-                    chunks = chunk_text(raw_text)
-                    vs = build_vectorstore(chunks, vectorstore_path)
-                    with open(os.path.join(vectorstore_path, "documento.pdf"), "wb") as f:
-                        f.write(pdf_doc.getbuffer())
-                    st.session_state.last_text_preview = raw_text[:3000]
+
+                    # 2) Crea vector store
+                    vs = build_vectorstore_from_documents(docs, vectorstore_path)
+
+                    # 3) Salva copia PDF per anteprima
+                    try:
+                        with open(os.path.join(vectorstore_path, "documento.pdf"), "wb") as f:
+                            f.write(pdf_doc.getbuffer())
+                    except Exception:
+                        pass
+
+                    # 4) Aggiorna stato + reset completo sessione (punto 2)
+                    preview_text = "\n".join([d.page_content for d in docs[:4]])  # piccola anteprima
+                    st.session_state.last_text_preview = preview_text[:3000]
                     st.session_state.conversation = build_chain(vs, st.session_state.llm_temperature)
                     st.session_state.current_index = filename
                     st.session_state.messages = []
                     st.session_state.last_sources = []
+                    # pulizia input
+                    st.session_state.pop("user_q", None)
+
                     st.success(f"✅ Documento '{filename}' indicizzato e pronto all'uso!")
                 except Exception as e:
                     st.error(f"❌ Errore durante l'elaborazione: {e}")
 
     # ---------- Caricamento indice esistente ----------
-    selected = st.session_state.get("current_index") if st.session_state.get("current_index") else selected
     if selected != "-- Nessuno --" and selected != st.session_state.current_index:
         with st.spinner("🔁 Caricamento indice..."):
             try:
                 vs = load_vectorstore(os.path.join(ensure_store_dir(), selected))
                 st.session_state.conversation = build_chain(vs, st.session_state.llm_temperature)
                 st.session_state.current_index = selected
+
+                # Carica anteprima testo se disponibile
                 pdf_path = os.path.join(ensure_store_dir(), selected, "documento.pdf")
                 if os.path.exists(pdf_path):
-                    with pdfplumber.open(pdf_path) as pdf_file:
-                        text = "".join([p.extract_text() or "" for p in pdf_file.pages])
-                        st.session_state.last_text_preview = text[:3000]
-                st.success(f"✅ Indice '{selected}' caricato!")
+                    try:
+                        with pdfplumber.open(pdf_path) as pdf_file:
+                            text = "".join([p.extract_text() or "" for p in pdf_file.pages])
+                            st.session_state.last_text_preview = text[:3000]
+                    except Exception:
+                        st.session_state.last_text_preview = ""
+
+                # Reset completo sessione e input (punto 2)
                 st.session_state.messages = []
                 st.session_state.last_sources = []
+                st.session_state.pop("user_q", None)
+
+                st.success(f"✅ Indice '{selected}' caricato!")
             except Exception as e:
                 st.error(f"❌ Errore nel caricamento dell'indice: {e}")
 
@@ -294,27 +348,28 @@ def main():
             st.markdown("- **Fammi un riassunto per avere il contesto.**")
             st.markdown("- **Quali sono i punti chiave trattati?**")
 
-    # ---------- Input domanda ----------
-    user_question = st.text_input("Fai una domanda sul documento selezionato:", key="user_q")
+    # ---------- Input domanda (FORM: si svuota automaticamente) ----------
+    with st.form("qa_form", clear_on_submit=True):
+        user_question = st.text_input("Fai una domanda sul documento selezionato:", key="user_q")
+        submitted = st.form_submit_button("Invia")
 
-    if "user_q" in st.session_state and st.session_state.user_q:
+    if submitted and user_question and user_question.strip():
         if not st.session_state.conversation:
             st.warning("⚠️ Seleziona o carica prima un documento.")
         else:
             with st.spinner("🧠 Elaborazione..."):
                 try:
-                    q = st.session_state.user_q.strip()
-                    if q:
-                        st.session_state.messages.append({"role": "user", "content": q})
-                        response = st.session_state.conversation({"question": q})
-                        st.session_state.messages.append({"role": "assistant", "content": response["answer"]})
-                        st.session_state.last_sources = response.get("source_documents", [])
+                    q = user_question.strip()
+                    # 1) salva la domanda
+                    st.session_state.messages.append({"role": "user", "content": q})
+                    # 2) esegui la chain
+                    response = st.session_state.conversation({"question": q})
+                    answer = response["answer"]
+                    # 3) salva la risposta e le fonti
+                    st.session_state.messages.append({"role": "assistant", "content": answer})
+                    st.session_state.last_sources = response.get("source_documents", [])
                 except Exception as e:
                     st.error(f"❌ Errore durante la risposta: {e}")
-                finally:
-                    # prova a svuotare l'input per il prossimo run
-                    st.session_state.__clear_user_q = True
-                    st.rerun()
 
     # ---------- Render chat ----------
     if st.session_state.get("messages"):
@@ -324,10 +379,18 @@ def main():
             else:
                 st.markdown(BOT_TEMPLATE.format(msg=msg["content"]), unsafe_allow_html=True)
 
+        # Fonti: mostra pagina se presente nei metadati
         if st.session_state.get("last_sources"):
             with st.expander("🔍 Contenuti utilizzati per l'ultima risposta"):
-                for i, doc in enumerate(st.session_state.last_sources):
-                    st.markdown(f"**Chunk {i+1}:**\n\n{doc.page_content}\n\n---")
+                for i, doc in enumerate(st.session_state.last_sources, start=1):
+                    page = doc.metadata.get("page")
+                    src = doc.metadata.get("source", "")
+                    header = f"**Chunk {i}**"
+                    if page:
+                        header += f" · p. {page}"
+                    if src:
+                        header += f" · {src}"
+                    st.markdown(f"{header}\n\n{doc.page_content}\n\n---")
 
     # ---------- Note semplificate ----------
     with st.expander("ℹ️ Note importanti"):
@@ -341,6 +404,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
