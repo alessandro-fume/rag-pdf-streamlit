@@ -15,20 +15,25 @@ from langchain.chains import ConversationalRetrievalChain
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
 
+# NEW: auth
+import streamlit_authenticator as stauth
+
 # =============================
 # Branding / impostazioni base
 # =============================
 APP_TITLE = "Chatbot EOS Reply – PDF Documents"
-FAVICON_PATH = "logo_favicon.png"   # quadrata, ottimizzata per tab browser
-LOGO_PATH   = "logo_eos_reply.png"  # logo in pagina/sidebar (orizzontale)
+FAVICON_PATH = "logo_favicon.png"   # favicon (quadrata)
+LOGO_PATH   = "logo_eos_reply.png"  # logo in pagina/sidebar
 
-BASE_DIR = "vectorstore"
+# === Multi-tenant root (ogni utente ha il suo "spazio") ===
+TENANT_ROOT = "tenants"             # dentro qui creiamo sottocartella per utente
 TRUST_MARK_FILE = ".trusted_by_app"
 TRUST_MARK_VALUE = "EOS-REPLY-RAG-V1"
 LEGACY_PREFIXES = ("ws_",)
 
-# Persistenza conversazioni (locale per indice)
-CONV_SUBDIR = "conversations"  # vectorstore/<index>/conversations/<conv_id>.json
+# Sottocartelle per ogni utente
+VSTORE_DIRNAME = "vectorstore"
+CONV_SUBDIR    = "conversations"    # per-insieme di chat: tenants/<user>/vectorstore/<index>/conversations/*.json
 
 # =============================
 # Stili e template
@@ -67,7 +72,7 @@ Risposta (markdown, includi elenco completo se applicabile):
 """)
 
 # =============================
-# Utility
+# Utility comuni
 # =============================
 def get_openai_key_from_secrets() -> str:
     key = st.secrets.get("OPENAI_API_KEY")
@@ -77,9 +82,21 @@ def get_openai_key_from_secrets() -> str:
     os.environ["OPENAI_API_KEY"] = key
     return key
 
-def ensure_store_dir() -> str:
-    os.makedirs(BASE_DIR, exist_ok=True)
-    return BASE_DIR
+def slugify(s: str) -> str:
+    s = s.strip().lower()
+    s = re.sub(r"[^a-z0-9._-]+", "_", s)
+    return s[:80] or "user"
+
+def user_root(user_slug: str) -> str:
+    root = os.path.join(TENANT_ROOT, user_slug)
+    os.makedirs(root, exist_ok=True)
+    return root
+
+def ensure_store_dir(user_slug: str) -> str:
+    """Ritorna la cartella vectorstore per l'utente loggato."""
+    base = os.path.join(user_root(user_slug), VSTORE_DIRNAME)
+    os.makedirs(base, exist_ok=True)
+    return base
 
 def safe_name(name: str) -> str:
     stem = pathlib.Path(name).stem
@@ -96,8 +113,8 @@ def _has_trust_mark(dir_path: str) -> bool:
         return False
     return False
 
-def list_indices() -> list:
-    base = ensure_store_dir()
+def list_indices(user_slug: str) -> list:
+    base = ensure_store_dir(user_slug)
     items = []
     if os.path.exists(base):
         for d in os.scandir(base):
@@ -105,37 +122,30 @@ def list_indices() -> list:
                 items.append(d.name)
     return sorted(items)
 
-# ======= Persistenza conversazioni (per indice) =======
-def ensure_conv_dir(index: str) -> str:
-    base = ensure_store_dir()
-    conv_dir = os.path.join(base, index, CONV_SUBDIR)
+# ======= Persistenza conversazioni (per indice & utente) =======
+def ensure_conv_dir(user_slug: str, index: str) -> str:
+    conv_dir = os.path.join(ensure_store_dir(user_slug), index, CONV_SUBDIR)
     os.makedirs(conv_dir, exist_ok=True)
     return conv_dir
 
-def conv_file_path(index: str, conv_id: str) -> str:
-    return os.path.join(ensure_conv_dir(index), f"{conv_id}.json")
+def conv_file_path(user_slug: str, index: str, conv_id: str) -> str:
+    return os.path.join(ensure_conv_dir(user_slug, index), f"{conv_id}.json")
 
 def new_conv_id() -> str:
-    # es: 2025-08-14_10-32-05
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-def list_conversations(index: str) -> list[tuple[str, str]]:
-    """
-    Ritorna lista di tuple (conv_id, label_leggibile) ordinate per data decrescente.
-    Label default = conv_id con sostituzioni estetiche.
-    """
-    conv_dir = ensure_conv_dir(index)
+def list_conversations(user_slug: str, index: str) -> list[tuple[str, str]]:
+    conv_dir = ensure_conv_dir(user_slug, index)
     items = []
     for f in os.scandir(conv_dir):
         if f.is_file() and f.name.endswith(".json"):
             conv_id = f.name[:-5]
-            # label leggibile tipo "2025-08-14 10:32:05"
             label = conv_id.replace("_", " ").replace("-", ":")
             items.append((conv_id, label))
     return sorted(items, key=lambda x: x[0], reverse=True)
 
-def load_chat(index: str, conv_id: str) -> list[dict]:
-    p = conv_file_path(index, conv_id)
+def load_chat(user_slug: str, index: str, conv_id: str) -> list[dict]:
+    p = conv_file_path(user_slug, index, conv_id)
     if os.path.exists(p):
         try:
             with open(p, "r", encoding="utf-8") as f:
@@ -144,8 +154,8 @@ def load_chat(index: str, conv_id: str) -> list[dict]:
             return []
     return []
 
-def save_chat(index: str, conv_id: str, messages: list[dict]) -> None:
-    p = conv_file_path(index, conv_id)
+def save_chat(user_slug: str, index: str, conv_id: str, messages: list[dict]) -> None:
+    p = conv_file_path(user_slug, index, conv_id)
     try:
         with open(p, "w", encoding="utf-8") as f:
             json.dump(messages, f, ensure_ascii=False, indent=2)
@@ -156,11 +166,6 @@ def save_chat(index: str, conv_id: str, messages: list[dict]) -> None:
 # PDF → Documents con metadati pagina
 # =============================
 def documents_from_pdf_with_pages(uploaded_pdf) -> list[Document]:
-    """
-    Estrae il testo pagina per pagina e crea Document con metadati:
-    - page: numero pagina (1-based)
-    - source: nome file
-    """
     docs = []
     file_name = getattr(uploaded_pdf, "name", "documento.pdf")
     splitter = CharacterTextSplitter(
@@ -174,7 +179,6 @@ def documents_from_pdf_with_pages(uploaded_pdf) -> list[Document]:
             for i, page in enumerate(reader.pages, start=1):
                 text = page.extract_text() or ""
                 if not text.strip():
-                    # se pagina vuota (scansione immagine senza OCR), salta
                     continue
                 for chunk in splitter.split_text(text):
                     docs.append(
@@ -195,7 +199,6 @@ def build_vectorstore_from_documents(docs, path: str):
     vs = FAISS.from_documents(docs, embedding=embeddings)
     os.makedirs(path, exist_ok=True)
     vs.save_local(path)
-    # marker di fiducia
     try:
         with open(os.path.join(path, TRUST_MARK_FILE), "w", encoding="utf-8") as f:
             f.write(TRUST_MARK_VALUE)
@@ -206,18 +209,15 @@ def build_vectorstore_from_documents(docs, path: str):
 @st.cache_resource(show_spinner=False)
 def load_vectorstore(path: str):
     name = os.path.basename(path)
-    if not (_has_trust_mark(path) or any(name.startswith(p) for p in LEGACY_PREFIXES)):
-        st.error("Indice non riconosciuto come creato da questa app.")
-        st.stop()
+    # NB: il check qui non ha accesso a user, ma resta valido come sicurezza file-level
     embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
     return FAISS.load_local(path, embeddings, allow_dangerous_deserialization=True)
 
 def build_chain(vectorstore, temperature: float):
-    # LLM con più spazio di output per elenchi completi
     llm = ChatOpenAI(
-        temperature=0.2,                # più deterministico
+        temperature=0.2,
         model_name="gpt-3.5-turbo",
-        max_tokens=900                  # più margine per step lunghi
+        max_tokens=900
     )
     memory = ConversationSummaryMemory(
         llm=llm,
@@ -226,7 +226,6 @@ def build_chain(vectorstore, temperature: float):
         output_key="answer",
         return_messages=True
     )
-    # retriever più “ampio” per aumentare copertura
     retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
     return ConversationalRetrievalChain.from_llm(
         llm=llm,
@@ -241,7 +240,6 @@ def build_chain(vectorstore, temperature: float):
 # Header con logo + titolo
 # =============================
 def render_header():
-    """Mostra il logo a sinistra e il titolo a destra."""
     if os.path.exists(LOGO_PATH):
         col1, col2 = st.columns([0.12, 0.88])
         with col1:
@@ -255,13 +253,55 @@ def render_header():
         st.title(APP_TITLE)
 
 # =============================
-# App
+# AUTH
 # =============================
-def main():
+def do_login():
     st.set_page_config(page_title=APP_TITLE, page_icon=FAVICON_PATH)
-    get_openai_key_from_secrets()
     st.markdown(CSS, unsafe_allow_html=True)
     render_header()
+
+    # Config da secrets
+    auth_secrets = st.secrets.get("auth", None)
+    if not auth_secrets:
+        st.error("Configurazione autenticazione assente in st.secrets['auth'].")
+        st.stop()
+
+    credentials = auth_secrets.get("credentials", {})
+    cookie_name = auth_secrets.get("cookie_name", "eos_reply_chatbot")
+    cookie_key  = auth_secrets.get("cookie_key",  "PLEASE_SET_A_RANDOM_SECRET")
+    cookie_expiry_days = auth_secrets.get("cookie_expiry_days", 30)
+    preauthorized = auth_secrets.get("preauthorized", {})
+
+    authenticator = stauth.Authenticate(
+        credentials=credentials,
+        cookie_name=cookie_name,
+        key=cookie_key,
+        cookie_expiry_days=cookie_expiry_days,
+        preauthorized=preauthorized
+    )
+
+    name, auth_status, username = authenticator.login("main", fields={"Form name":"Login", "Username":"Username", "Password":"Password"})
+    if auth_status is False:
+        st.error("Username/Password non corretti.")
+        st.stop()
+    if auth_status is None:
+        st.info("Inserisci le credenziali per accedere.")
+        st.stop()
+
+    # Logged in
+    authenticator.logout("Logout", "sidebar")
+    return name, username, authenticator
+
+# =============================
+# App principale (post-login)
+# =============================
+def main_app(user_name: str, user_username: str):
+    st.markdown(CSS, unsafe_allow_html=True)
+    render_header()
+    get_openai_key_from_secrets()
+
+    # Slug unico per utente (cartelle separate)
+    user_slug = slugify(user_username or user_name or "user")
 
     # Stato
     defaults = {
@@ -273,7 +313,7 @@ def main():
         "llm_temperature": 0.3,
         "messages": [],
         "last_sources": [],
-        "conv_id": None,  # ID della conversazione attiva per l'indice corrente
+        "conv_id": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -283,24 +323,24 @@ def main():
     with st.sidebar:
         if os.path.exists(LOGO_PATH):
             st.image(LOGO_PATH, width=120)
+        st.caption(f"👤 Utente: **{user_name}**")
 
         st.subheader("⚙️ Impostazioni")
         st.session_state.llm_temperature = st.slider("Temperatura del modello", 0.0, 1.0, 0.5, step=0.1)
 
-        st.subheader("📁 Indici disponibili (persistenti)")
-        indices = list_indices()
+        st.subheader("📁 I miei documenti indicizzati")
+        indices = list_indices(user_slug)
         selected = st.selectbox("Scegli un documento indicizzato", options=["-- Nessuno --"] + indices)
 
-        # Archivio conversazioni (per indice selezionato)
+        # Archivio conversazioni per indice
         if selected != "-- Nessuno --":
             with st.expander("🗂️ Archivio conversazioni"):
-                convs = list_conversations(selected)
+                convs = list_conversations(user_slug, selected)
                 if not convs:
                     st.caption("Nessuna conversazione salvata per questo documento.")
                 else:
                     labels = [lbl for _, lbl in convs]
                     ids    = [cid for cid, _ in convs]
-                    # default: se c'è già conv_id attivo, selezionalo
                     try:
                         default_ix = ids.index(st.session_state.conv_id) if st.session_state.conv_id in ids else 0
                     except Exception:
@@ -311,17 +351,17 @@ def main():
                     with col_a:
                         if st.button("Apri"):
                             st.session_state.conv_id = ids[pick_ix]
-                            st.session_state.messages = load_chat(selected, st.session_state.conv_id)
+                            st.session_state.messages = load_chat(user_slug, selected, st.session_state.conv_id)
                             st.experimental_rerun()
                     with col_b:
                         if st.button("Nuova"):
                             st.session_state.conv_id = new_conv_id()
                             st.session_state.messages = []
-                            save_chat(selected, st.session_state.conv_id, st.session_state.messages)
+                            save_chat(user_slug, selected, st.session_state.conv_id, st.session_state.messages)
                             st.experimental_rerun()
                     with col_c:
                         if st.button("Elimina"):
-                            p = conv_file_path(selected, ids[pick_ix])
+                            p = conv_file_path(user_slug, selected, ids[pick_ix])
                             try:
                                 os.remove(p)
                                 if st.session_state.conv_id == ids[pick_ix]:
@@ -341,9 +381,8 @@ def main():
             with col2:
                 if st.session_state.confirm_delete and st.button("✅ Conferma"):
                     try:
-                        shutil.rmtree(os.path.join(ensure_store_dir(), selected))
+                        shutil.rmtree(os.path.join(ensure_store_dir(user_slug), selected))
                         st.success(f"Indice '{selected}' eliminato.")
-                        # Reset totale stato e input
                         st.session_state.update({
                             "conversation": None,
                             "last_text_preview": "",
@@ -360,7 +399,7 @@ def main():
 
         # Upload e indicizzazione
         st.markdown("---")
-        st.subheader("📤 Carica nuovo PDF da indicizzare")
+        st.subheader("📤 Carica nuovo PDF da indicizzare (privato)")
         pdf_doc = st.file_uploader("Carica un PDF", type=["pdf"], accept_multiple_files=False)
         overwrite = st.checkbox("Sovrascrivi se già esistente", value=False)
 
@@ -368,37 +407,32 @@ def main():
             with st.spinner("📚 Indicizzazione in corso..."):
                 try:
                     filename = safe_name(pdf_doc.name)
-                    vectorstore_path = os.path.join(ensure_store_dir(), filename)
+                    vectorstore_path = os.path.join(ensure_store_dir(user_slug), filename)
                     if os.path.exists(vectorstore_path) and not overwrite:
                         st.warning("Documento già processato.")
                         st.stop()
 
-                    # 1) Estrai Document con metadati pagina
                     docs = documents_from_pdf_with_pages(pdf_doc)
                     if not docs:
                         st.error("❌ Nessun testo leggibile trovato nel PDF (forse scannerizzato senza OCR).")
                         st.stop()
 
-                    # 2) Crea vector store
                     vs = build_vectorstore_from_documents(docs, vectorstore_path)
 
-                    # 3) Salva copia PDF per anteprima
                     try:
                         with open(os.path.join(vectorstore_path, "documento.pdf"), "wb") as f:
                             f.write(pdf_doc.getbuffer())
                     except Exception:
                         pass
 
-                    # 4) Aggiorna stato + reset completo sessione
-                    preview_text = "\n".join([d.page_content for d in docs[:4]])  # piccola anteprima
+                    preview_text = "\n".join([d.page_content for d in docs[:4]])
                     st.session_state.last_text_preview = preview_text[:3000]
                     st.session_state.conversation = build_chain(vs, st.session_state.llm_temperature)
                     st.session_state.current_index = filename
                     st.session_state.messages = []
                     st.session_state.last_sources = []
-                    # nuova conversazione per questo indice
                     st.session_state.conv_id = new_conv_id()
-                    save_chat(st.session_state.current_index, st.session_state.conv_id, st.session_state.messages)
+                    save_chat(user_slug, st.session_state.current_index, st.session_state.conv_id, st.session_state.messages)
 
                     st.success(f"✅ Documento '{filename}' indicizzato e pronto all'uso!")
                 except Exception as e:
@@ -408,12 +442,11 @@ def main():
     if selected != "-- Nessuno --" and selected != st.session_state.current_index:
         with st.spinner("🔁 Caricamento indice..."):
             try:
-                vs = load_vectorstore(os.path.join(ensure_store_dir(), selected))
+                vs = load_vectorstore(os.path.join(ensure_store_dir(user_slug), selected))
                 st.session_state.conversation = build_chain(vs, st.session_state.llm_temperature)
                 st.session_state.current_index = selected
 
-                # Carica anteprima testo se disponibile
-                pdf_path = os.path.join(ensure_store_dir(), selected, "documento.pdf")
+                pdf_path = os.path.join(ensure_store_dir(user_slug), selected, "documento.pdf")
                 if os.path.exists(pdf_path):
                     try:
                         with pdfplumber.open(pdf_path) as pdf_file:
@@ -422,15 +455,14 @@ def main():
                     except Exception:
                         st.session_state.last_text_preview = ""
 
-                # Reset sessione + apri l'ultima conversazione disponibile (se presente) o creane una nuova
-                convs = list_conversations(selected)
+                convs = list_conversations(user_slug, selected)
                 if convs:
-                    st.session_state.conv_id = convs[0][0]  # la più recente
-                    st.session_state.messages = load_chat(selected, st.session_state.conv_id)
+                    st.session_state.conv_id = convs[0][0]
+                    st.session_state.messages = load_chat(user_slug, selected, st.session_state.conv_id)
                 else:
                     st.session_state.conv_id = new_conv_id()
                     st.session_state.messages = []
-                    save_chat(selected, st.session_state.conv_id, st.session_state.messages)
+                    save_chat(user_slug, selected, st.session_state.conv_id, st.session_state.messages)
 
                 st.session_state.last_sources = []
                 st.success(f"✅ Indice '{selected}' caricato!")
@@ -448,7 +480,7 @@ def main():
             st.markdown("- **Fammi un riassunto per avere il contesto.**")
             st.markdown("- **Quali sono i punti chiave trattati?**")
 
-    # ---------- Input domanda (FORM: si svuota automaticamente) ----------
+    # ---------- Input domanda ----------
     with st.form("qa_form", clear_on_submit=True):
         user_question = st.text_input("Fai una domanda sul documento selezionato:")
         submitted = st.form_submit_button("Invia")
@@ -460,17 +492,14 @@ def main():
             with st.spinner("🧠 Elaborazione..."):
                 try:
                     q = user_question.strip()
-                    # 1) salva la domanda
                     st.session_state.messages.append({"role": "user", "content": q})
-                    # 2) esegui la chain
                     response = st.session_state.conversation({"question": q})
                     answer = response["answer"]
-                    # 3) salva la risposta e le fonti
                     st.session_state.messages.append({"role": "assistant", "content": answer})
                     st.session_state.last_sources = response.get("source_documents", [])
-                    # 4) persisti conversazione
+                    # persist
                     if st.session_state.current_index and st.session_state.conv_id:
-                        save_chat(st.session_state.current_index, st.session_state.conv_id, st.session_state.messages)
+                        save_chat(user_slug, st.session_state.current_index, st.session_state.conv_id, st.session_state.messages)
                 except Exception as e:
                     st.error(f"❌ Errore durante la risposta: {e}")
 
@@ -482,7 +511,6 @@ def main():
             else:
                 st.markdown(BOT_TEMPLATE.format(msg=msg["content"]), unsafe_allow_html=True)
 
-        # Fonti: mostra pagina se presente nei metadati
         if st.session_state.get("last_sources"):
             with st.expander("🔍 Contenuti utilizzati per l'ultima risposta"):
                 for i, doc in enumerate(st.session_state.last_sources, start=1):
@@ -495,16 +523,23 @@ def main():
                         header += f" · {src}"
                     st.markdown(f"{header}\n\n{doc.page_content}\n\n---")
 
-    # ---------- Note semplificate ----------
     with st.expander("ℹ️ Note importanti"):
         st.markdown(
             """
-- Puoi caricare PDF di qualsiasi dimensione (i file molto grandi potrebbero richiedere più tempo).
+- Ogni utente vede SOLO i propri documenti/conversazioni (spazi isolati).
 - I PDF scannerizzati (solo immagine) potrebbero non contenere testo ricercabile.
-- I documenti indicizzati restano disponibili finché l'app rimane attiva.
-- Le conversazioni vengono salvate localmente per documento (Archivio conversazioni nella sidebar).
+- Le conversazioni sono salvate localmente nel tuo spazio utente.
             """
         )
+
+# =============================
+# Entrypoint
+# =============================
+def main():
+    # Login
+    name, username, _auth = do_login()
+    # App per l'utente autenticato
+    main_app(name, username)
 
 if __name__ == "__main__":
     main()
