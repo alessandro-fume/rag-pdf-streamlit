@@ -14,8 +14,7 @@ from langchain.chains import ConversationalRetrievalChain
 # Branding / impostazioni base
 # =============================
 APP_TITLE = "Chatbot EOS Reply – PDF Documents"
-# Se metti il file del logo nel repo, rinominalo così o aggiorna il percorso qui.
-LOGO_PATH = "logo_eos_reply.png"   # oppure .jpg
+LOGO_PATH = "logo_eos_reply.png"     # <-- metti questo file accanto ad app.py (png/jpg)
 APP_ICON_FALLBACK = "📚"
 
 BASE_DIR = "vectorstore"
@@ -33,6 +32,7 @@ CSS = """
     .bot  { background: #f7f7ff; border: 1px solid #e5e5ff; }
     .msg  { white-space: pre-wrap; }
     .muted{ color: #6b7280; font-size: 0.9rem; }
+    h1 { font-size: 2.6rem; }
 </style>
 """
 USER_TEMPLATE = """<div class="chat-msg user"><div class="msg">{msg}</div></div>"""
@@ -42,11 +42,10 @@ BOT_TEMPLATE  = """<div class="chat-msg bot"><div class="msg">{msg}</div></div>"
 # Utility
 # =============================
 def _load_page_icon():
-    """Prova a caricare il logo aziendale per l'icona della pagina.
-    Se non disponibile/leggibile, torna all'emoji di fallback."""
+    """Prova a usare il logo come favicon; se non c'è, usa l'emoji."""
     try:
         if os.path.exists(LOGO_PATH):
-            from PIL import Image  # lazy import per non fallire se Pillow non c'è
+            from PIL import Image  # opzionale; se non presente, torna al fallback
             return Image.open(LOGO_PATH)
     except Exception:
         pass
@@ -152,13 +151,30 @@ def build_chain(vectorstore, temperature: float):
     )
 
 # =============================
+# Header con logo + titolo
+# =============================
+def render_header():
+    """Mostra il logo a sinistra e il titolo a destra."""
+    if os.path.exists(LOGO_PATH):
+        col1, col2 = st.columns([0.12, 0.88])
+        with col1:
+            st.image(LOGO_PATH, width=56)
+        with col2:
+            st.markdown(
+                f"<h1 style='margin-top:0.2rem; margin-bottom:0.2rem;'>{APP_TITLE}</h1>",
+                unsafe_allow_html=True,
+            )
+    else:
+        st.title(APP_TITLE)
+
+# =============================
 # App
 # =============================
 def main():
     st.set_page_config(page_title=APP_TITLE, page_icon=_load_page_icon())
     get_openai_key_from_secrets()
     st.markdown(CSS, unsafe_allow_html=True)
-    st.title(APP_TITLE)
+    render_header()
 
     # Stato
     defaults = {
@@ -170,13 +186,13 @@ def main():
         "llm_temperature": 0.3,
         "messages": [],
         "last_sources": [],
-        "__clear_user_q": False,  # flag per tentare lo svuotamento del box
+        "__clear_user_q": False,  # flag per svuotare il box prima del prossimo render
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
-    # Se dobbiamo pulire, rimuoviamo la chiave PRIMA di creare il text_input
+    # se dobbiamo pulire, rimuoviamo la chiave PRIMA di creare il text_input
     if st.session_state.__clear_user_q:
         if "user_q" in st.session_state:
             del st.session_state["user_q"]
@@ -184,6 +200,8 @@ def main():
 
     # ---------- Sidebar ----------
     with st.sidebar:
+        if os.path.exists(LOGO_PATH):
+            st.image(LOGO_PATH, width=120)
         st.subheader("⚙️ Impostazioni")
         st.session_state.llm_temperature = st.slider("Temperatura del modello", 0.0, 1.0, 0.3, step=0.1)
 
@@ -246,6 +264,7 @@ def main():
                     st.error(f"❌ Errore durante l'elaborazione: {e}")
 
     # ---------- Caricamento indice esistente ----------
+    selected = st.session_state.get("current_index") if st.session_state.get("current_index") else selected
     if selected != "-- Nessuno --" and selected != st.session_state.current_index:
         with st.spinner("🔁 Caricamento indice..."):
             try:
@@ -309,7 +328,7 @@ def main():
                 for i, doc in enumerate(st.session_state.last_sources):
                     st.markdown(f"**Chunk {i+1}:**\n\n{doc.page_content}\n\n---")
 
-    # ---------- Note semplificate per gli utenti ----------
+    # ---------- Note semplificate ----------
     with st.expander("ℹ️ Note importanti"):
         st.markdown(
             """
